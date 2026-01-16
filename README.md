@@ -6,7 +6,7 @@
 
 ## The concept behind - what it's make for and what it isn't for
 
-It's a hamradio application for SDR devices using the HPSDR protocol 1 (aka "old protocol") or 2 (aka "new protocol") and based at previous codeparts of [piHPSDR](https://github.com/dl1ycf/pihpsdr) since it was forked from piHPSDR in October 2024. But anywhere, it's no more piHPSDR yet and has no backward dependencies to piHPSDR. My goal was to make an more optimzed version running with Desktop-OS like Linux and macOS, what means I don't support small displays less as 1280x600 and SoCs like the Raspberry Pi or similar devices are not within the scope of this application. In the case mini-display you need to fallback to piHPSDR, deskHPSDR don't support this anymore.
+It's a hamradio application for SDR devices using the HPSDR protocol 1 (aka "old protocol") or 2 (aka "new protocol") and based at previous codeparts of [piHPSDR](https://github.com/dl1ycf/pihpsdr) since it was forked from piHPSDR in October 2024. But anywhere, it's no more piHPSDR yet and has no backward dependencies to piHPSDR. **This fork is optimized exclusively for LINUX systems, since macOS does not support GTK3**. This means only Desktop Linux systems are supported, and small displays less than 1280x600 and SoCs like the Raspberry Pi or similar devices are not within the scope of this application. In the case mini-display you need to fallback to piHPSDR, deskHPSDR don't support this anymore.
 
 **deskHPSDR is a dedicated SDR transceiver frontend application using OpenHPSDR protocols 1 or 2 for everyday use in amateur radio. Limited additional SoapySDR support is also available.**
 
