@@ -159,6 +159,28 @@ static void wf_reset_history(WaterfallGLState *st) {
 }
 
 // =================== Shaders ===================
+// macOS supports OpenGL 3.2 Core Profile minimum (GLSL 150)
+// Linux typically supports OpenGL 3.3+ (GLSL 330)
+#ifdef __APPLE__
+static const char *vertex_shader_src =
+  "#version 150 core\n"
+  "in vec3 a_pos;\n"
+  "in vec4 a_col;\n"
+  "out vec4 v_col;\n"
+  "uniform mat4 u_mvp;\n"
+  "void main() {\n"
+  "  gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
+  "  v_col = a_col;\n"
+  "}\n";
+
+static const char *fragment_shader_src =
+  "#version 150 core\n"
+  "in vec4 v_col;\n"
+  "out vec4 FragColor;\n"
+  "void main() {\n"
+  "  FragColor = v_col;\n"
+  "}\n";
+#else
 static const char *vertex_shader_src =
   "#version 330 core\n"
   "layout(location = 0) in vec3 a_pos;\n"
@@ -177,6 +199,7 @@ static const char *fragment_shader_src =
   "void main() {\n"
   "  FragColor = v_col;\n"
   "}\n";
+#endif
 
 static GLuint compile_shader(GLenum type, const char *src) {
   GLuint shader = glCreateShader(type);
@@ -452,10 +475,18 @@ void waterfall3dss_gl_realize(GtkGLArea *area, gpointer data) {
     return;
   }
   
+  // Debug: Print OpenGL version info
+  const GLubyte* version = glGetString(GL_VERSION);
+  const GLubyte* renderer = glGetString(GL_RENDERER);
+  g_print("[WF3DSS RX%d] GL Version: %s\n", rx->id, version ? (const char*)version : "unknown");
+  g_print("[WF3DSS RX%d] GL Renderer: %s\n", rx->id, renderer ? (const char*)renderer : "unknown");
+  
   GLuint vs = compile_shader(GL_VERTEX_SHADER, vertex_shader_src);
   GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src);
   if (!vs || !fs) {
-    g_print("[WF3DSS] Shader compilation failed!\n");
+    g_print("[WF3DSS RX%d] Shader compilation failed!\n", rx->id);
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
     return;
   }
   
@@ -463,9 +494,29 @@ void waterfall3dss_gl_realize(GtkGLArea *area, gpointer data) {
   glDeleteShader(vs);
   glDeleteShader(fs);
   
-  if (!st->prog) return;
+  if (!st->prog) {
+    g_print("[WF3DSS RX%d] Program linking failed!\n", rx->id);
+    return;
+  }
+  
+  g_print("[WF3DSS RX%d] Shaders compiled and linked successfully\n", rx->id);
   
   st->u_mvp = glGetUniformLocation(st->prog, "u_mvp");
+  
+#ifdef __APPLE__
+  // macOS/GLSL 150: bind attribute locations manually (no layout qualifiers)
+  glBindAttribLocation(st->prog, 0, "a_pos");
+  glBindAttribLocation(st->prog, 1, "a_col");
+  glLinkProgram(st->prog); // Re-link after binding attributes
+  
+  GLint link_ok = 0;
+  glGetProgramiv(st->prog, GL_LINK_STATUS, &link_ok);
+  if (!link_ok) {
+    g_print("[WF3DSS RX%d] Program re-link after attribute binding failed!\n", rx->id);
+    return;
+  }
+  g_print("[WF3DSS RX%d] Attribute locations bound for macOS\n", rx->id);
+#endif
   
   // Initialize interactive controls
   st->tilt_angle = 2.8f;
@@ -477,6 +528,12 @@ void waterfall3dss_gl_realize(GtkGLArea *area, gpointer data) {
   // Main mesh VAO
   glGenVertexArrays(1, &st->vao);
   glGenBuffers(1, &st->vbo);
+  
+  GLenum err = glGetError();
+  if (err != GL_NO_ERROR) {
+    g_print("[WF3DSS RX%d] GL error after gen VAO/VBO: 0x%04x\n", rx->id, err);
+  }
+  
   glBindVertexArray(st->vao);
   glBindBuffer(GL_ARRAY_BUFFER, st->vbo);
   
@@ -486,6 +543,12 @@ void waterfall3dss_gl_realize(GtkGLArea *area, gpointer data) {
   glEnableVertexAttribArray(1);
   
   glBindVertexArray(0);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  
+  err = glGetError();
+  if (err != GL_NO_ERROR) {
+    g_print("[WF3DSS RX%d] GL error after VAO setup: 0x%04x\n", rx->id, err);
+  }
   
   // Grid VAO
   glGenVertexArrays(1, &st->grid_vao);
@@ -521,8 +584,14 @@ gboolean waterfall3dss_gl_render(GtkGLArea *area, GdkGLContext *context, gpointe
   RECEIVER *rx = (RECEIVER*)data;
   WaterfallGLState *st = wf_get(rx);
   
+  if (!st) {
+    g_print("[WF3DSS] Render called but state is NULL\n");
+    return FALSE;
+  }
+  
   GError *error = gtk_gl_area_get_error(area);
   if (error) {
+    g_print("[WF3DSS RX%d] Render error: %s\n", rx->id, error->message);
     return FALSE;
   }
   
@@ -536,6 +605,10 @@ gboolean waterfall3dss_gl_render(GtkGLArea *area, GdkGLContext *context, gpointe
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   
   if (!st || !st->prog || !st->history) {
+    if (st && st->render_count < 5) {
+      g_print("[WF3DSS RX%d] Render skipped: prog=%d history=%p\n", 
+              rx->id, st->prog, (void*)st->history);
+    }
     return TRUE;
   }
   if (st->bins <= 2 || st->depth <= 2) {
@@ -643,12 +716,22 @@ gboolean waterfall3dss_gl_render(GtkGLArea *area, GdkGLContext *context, gpointe
   glBindBuffer(GL_ARRAY_BUFFER, st->vbo);
   glBufferData(GL_ARRAY_BUFFER, needed_floats * sizeof(float), st->vtx, GL_STREAM_DRAW);
   
+  GLenum err = glGetError();
+  if (err != GL_NO_ERROR && st->render_count < 5) {
+    g_print("[WF3DSS RX%d] GL error after buffer data upload: 0x%04x\n", rx->id, err);
+  }
+  
   size_t base = 0;
   for (int s = 0; s < (D - 1); s++) {
     glDrawArrays(GL_TRIANGLE_STRIP, (GLint)base, (GLint)(W * 2));
     base += (size_t)W * 2;
   }
   glBindVertexArray(0);
+  
+  err = glGetError();
+  if (err != GL_NO_ERROR && st->render_count < 5) {
+    g_print("[WF3DSS RX%d] GL error after drawing: 0x%04x\n", rx->id, err);
+  }
   
   if (st->grid_vertices > 0) {
     glBindVertexArray(st->grid_vao);
@@ -756,7 +839,15 @@ void waterfall3dss_init(RECEIVER *rx, int width, int height) {
     
     gtk_gl_area_set_has_depth_buffer(GTK_GL_AREA(rx->waterfall), TRUE);
     gtk_gl_area_set_auto_render(GTK_GL_AREA(rx->waterfall), FALSE);
+    
+    // macOS requires OpenGL 3.2+ Core Profile, Linux typically supports 3.3+
+#ifdef __APPLE__
+    gtk_gl_area_set_required_version(GTK_GL_AREA(rx->waterfall), 3, 2);
+    g_print("[WF3DSS RX%d] Requesting OpenGL 3.2 Core Profile (macOS)\\n", rx->id);
+#else
     gtk_gl_area_set_required_version(GTK_GL_AREA(rx->waterfall), 3, 3);
+    g_print("[WF3DSS RX%d] Requesting OpenGL 3.3 Core Profile (Linux)\\n", rx->id);
+#endif
     
     g_signal_connect(rx->waterfall, "realize", G_CALLBACK(waterfall3dss_gl_realize), rx);
     g_signal_connect(rx->waterfall, "unrealize", G_CALLBACK(waterfall3dss_gl_unrealize), rx);
