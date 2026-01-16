@@ -83,7 +83,7 @@ waterfall_draw_cb (GtkWidget *widget,
   int box_height = 30;
   //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
   gdk_cairo_set_source_pixbuf (cr, rx->pixbuf, 0, 0);
-  cairo_paint (cr); // vor dem Zeichnen der Box aufrufen, sinst wird der pixbuf überschrieben !
+  cairo_paint (cr); // call before drawing the box, otherwise pixbuf will be overwritten!
 
   //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
   if (display_info_bar && active_receiver->display_waterfall && (active_receiver->display_panadapter == 0
@@ -208,13 +208,13 @@ static gboolean waterfall_scroll_event_cb (GtkWidget *widget, GdkEventScroll *ev
 }
 
 void waterfall_update(RECEIVER *rx) {
-  // Escolhe entre 2D (Cairo) e 3DSS (OpenGL) baseado no modo
+  // Choose between 2D (Cairo) and 3DSS (OpenGL) based on mode
   if (rx->waterfall_mode == 1) {
     waterfall3dss_update(rx);
     return;
   }
   
-  // Modo 2D original (Cairo)
+  // Original 2D mode (Cairo)
   if (rx->pixbuf) {
     const float *samples;
     long long vfofreq = vfo[rx->id].frequency; // access only once to be thread-safe
