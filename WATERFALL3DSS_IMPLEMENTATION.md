@@ -1,18 +1,32 @@
 # Waterfall 3DSS Implementation in deskHPSDR
 
 ## Summary
-This document describes the necessary changes to implement the Yaesu 3DSS-style 3D waterfall in deskHPSDR, maintaining compatibility with the existing 2D waterfall.
+This document describes the implementation of the Yaesu 3DSS-style 3D waterfall in deskHPSDR, maintaining full compatibility with the existing 2D waterfall. The implementation is **COMPLETE** and includes advanced features like RxPGA-based auto-threshold adjustment, multiple color palettes, and interactive controls.
+
+## Implementation Status: ✅ COMPLETE
+
+All features have been implemented and are working:
+- ✅ 3D OpenGL waterfall with Yaesu-style display
+- ✅ Dynamic mode switching (2D ↔ 3DSS)
+- ✅ RxPGA-based auto-threshold adjustment
+- ✅ 7 color palettes with selection in display menu
+- ✅ Interactive controls (tilt, zoom)
+- ✅ Settings persistence
+- ✅ Brightness/contrast optimization
 
 ## Created Files
 
 ### 1. waterfall3dss.c
 Complete 3D OpenGL waterfall implementation with:
-- OpenGL 3.3+ rendering using GLSL shaders
+- OpenGL 3.3+ rendering using GLSL shaders (3.2 for macOS, 3.3+ for Linux)
 - Yaesu-style 3D display with grid and perspective
-- Support for multiple color palettes
+- **7 color palettes**: Rainbow, Ocean, Green, Gray, Hot, Cool, Plasma
 - Interactive controls (mouse drag for tilt, scroll for zoom)
 - Spectrum history management with 120 lines of depth
 - Support for pan/zoom and frequency changes
+- **RxPGA auto-threshold adjustment**: Automatically compensates for gain changes
+- **Brightness optimization**: 50% base threshold with 2.5x brightness boost
+- **Stabilization system**: Tracks render/update cycles for smooth operation
 
 ### 2. waterfall3dss.h
 Header file with public function declarations:
@@ -20,10 +34,79 @@ Header file with public function declarations:
 - `waterfall3dss_update()` - Updates with new spectrum data
 - OpenGL callbacks (realize, unrealize, render)
 
-## Required Changes
+## Advanced Features
+
+### RxPGA Auto-Threshold Adjustment
+The waterfall automatically adjusts its display threshold when RxPGA (receiver gain) changes:
+
+```c
+typedef struct {
+  // ... other fields ...
+  
+  // Auto-adjust threshold based on RxPGA changes
+  int last_alex_attenuation;  // Track attenuation changes
+  int last_preamp;            // Track preamp changes
+  float base_threshold;       // Dynamically adjusted threshold (20%-80%)
+} WaterfallGLState;
+```
+
+**How it works:**
+1. Detects changes in `alex_attenuation` (steps of -10dB) or `preamp` (steps of +18dB)
+2. Calculates gain delta in dB
+3. Adjusts threshold proportionally to maintain consistent visual sensitivity
+4. Prevents "breathing" effect - only adjusts on manual RxPGA changes, not continuously
+
+**Example:**
+- RxPGA at 18dB: threshold ~50%, shows strong signals only
+- Increase to 38dB (+20dB): threshold auto-adjusts to ~70%
+- Visual appearance remains consistent despite gain change
+
+### Brightness and Contrast Optimization
+Current color mapping strategy:
+
+```c
+const float noise_threshold = 0.50f;  // Base: 50% of dynamic range
+
+if (p < noise_threshold) {
+  // Below threshold: black background
+  *r = *g = *b = 0.0f;
+  *h01 = 0.0f;  // Flat (no height)
+} else {
+  // Above threshold: high brightness signals
+  float signal = (p - threshold) / (1.0f - threshold);
+  
+  // Aggressive brightness boost
+  float brightness = 0.6f + (signal * 2.5f);  // Range: 0.6 to 3.1x
+  brightness = clamp(brightness, 0.6f, 3.0f);
+  
+  *r *= brightness;
+  *g *= brightness;
+  *b *= brightness;
+}
+```
+
+**Key parameters:**
+- **Base threshold**: 50% (adjusts with RxPGA)
+- **Minimum brightness**: 0.6x (for weak signals above threshold)
+- **Maximum brightness**: 3.0x (for strong signals)
+- **Height scaling**: 1.8x for strong signals
+
+### Color Palettes
+7 palettes available via display menu:
+0. **Rainbow**: Full spectrum transition
+1. **Ocean**: Blue/cyan tones
+2. **Green**: Monochrome green (classic radar)
+3. **Gray**: Monochrome grayscale
+4. **Hot**: Black → Red → Yellow → White
+5. **Cool**: Black → Blue → Cyan → White
+6. **Plasma**: White → Blue → Lilac → Red (default)
+
+Each palette includes depth-based color variation for 3D effect.
+
+## Required Changes (✅ ALL IMPLEMENTED)
 
 ### 1. receiver.h
-Add field for waterfall mode selection:
+Add fields for waterfall mode selection and palette:
 
 ```c
 typedef struct _receiver {
@@ -32,9 +115,9 @@ typedef struct _receiver {
   int waterfall_low;
   int waterfall_high;
   int waterfall_automatic;
-  
-  // NEW: Add this field
-  int waterfall_mode;  // 0 = 2D (Cairo), 1 = 3DSS (OpenGL)
+  int waterfall_mode;              // 0 = 2D (Cairo), 1 = 3DSS (OpenGL)
+  int last_waterfall_mode;         // Track mode changes for dynamic switching
+  int waterfall3dss_palette;       // Color palette: 0-6
   
   cairo_surface_t *panadapter_surface;
   GdkPixbuf *pixbuf;
@@ -64,14 +147,26 @@ void rx_reconfigure(RECEIVER *rx, int height) {
   // ... existing code ...
   
   if(rx->display_waterfall) {
-    if(rx->waterfall==NULL) {
-      // MODIFIED: Choose between 2D and 3DSS
+    // Check if we need to recreate waterfall due to mode change
+    int need_recreate = (rx->waterfall != NULL && 
+                        rx->last_waterfall_mode != rx->waterfall_mode);
+    
+    if (rx->waterfall == NULL || need_recreate) {
+      if (need_recreate) {
+        // Remove old waterfall before creating new one
+        gtk_container_remove(GTK_CONTAINER(rx->panel), rx->waterfall);
+        rx->waterfall = NULL;
+      }
+      
+      // Create waterfall in selected mode
       if (rx->waterfall_mode == 1) {
         waterfall3dss_init(rx, rx->width, myheight);
       } else {
         waterfall_init(rx, rx->width, myheight);
       }
+      
       gtk_fixed_put(GTK_FIXED(rx->panel), rx->waterfall, 0, y);
+      rx->last_waterfall_mode = rx->waterfall_mode;
     }
     // ... rest of code ...
   }
@@ -110,24 +205,19 @@ static gint update_display(gpointer data) {
 ```
 
 ### 4. display_menu.c (or configuration menu)
-Add option to toggle between 2D and 3DSS:
+Add options to toggle mode and select palette:
 
 ```c
 static void waterfall_mode_cb(GtkWidget *widget, gpointer data) {
-  RECEIVER *rx = (RECEIVER *)data;
-  int new_mode = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)) ? 1 : 0;
-  
-  if (rx->waterfall_mode != new_mode) {
-    rx->waterfall_mode = new_mode;
-    
-    // Remove current waterfall
-    if (rx->waterfall != NULL) {
-      gtk_container_remove(GTK_CONTAINER(rx->panel), rx->waterfall);
-      rx->waterfall = NULL;
-    }
-    
-    // Recreate with new mode
-    rx_reconfigure(rx, rx->height);
+  active_receiver->waterfall_mode = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)) ? 1 : 0;
+  radio_reconfigure();  // Triggers rx_reconfigure with dynamic switching
+}
+
+static void waterfall3dss_palette_cb(GtkWidget *widget, gpointer data) {
+  int new_palette = gtk_combo_box_get_active(GTK_COMBO_BOX(widget));
+  if (active_receiver->waterfall3dss_palette != new_palette) {
+    active_receiver->waterfall3dss_palette = new_palette;
+    // No need to recreate waterfall, just redraw with new palette
   }
 }
 
@@ -135,8 +225,19 @@ static void waterfall_mode_cb(GtkWidget *widget, gpointer data) {
 GtkWidget *waterfall_mode_switch = gtk_check_button_new_with_label("Waterfall 3DSS");
 gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(waterfall_mode_switch), 
                               active_receiver->waterfall_mode);
-g_signal_connect(waterfall_mode_switch, "toggled", G_CALLBACK(waterfall_mode_cb), 
-                 active_receiver);
+g_signal_connect(waterfall_mode_switch, "toggled", G_CALLBACK(waterfall_mode_cb), NULL);
+
+// Palette selection combo box
+GtkWidget *palette_combo = gtk_combo_box_text_new();
+gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(palette_combo), "Rainbow");
+gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(palette_combo), "Ocean");
+gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(palette_combo), "Green");
+gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(palette_combo), "Gray");
+gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(palette_combo), "Hot");
+gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(palette_combo), "Cool");
+gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(palette_combo), "Plasma");
+gtk_combo_box_set_active(GTK_COMBO_BOX(palette_combo), active_receiver->waterfall3dss_palette);
+g_signal_connect(palette_combo, "changed", G_CALLBACK(waterfall3dss_palette_cb), NULL);
 ```
 
 ### 5. property.c (save/restore settings)
@@ -254,21 +355,44 @@ waterfall_mode == 1 → waterfall3dss_update() → OpenGL 3D
 4. AGC stabilization: first 5 updates are ignored to avoid artifacts
 5. Mutex (`display_mutex`) protects concurrent access to spectrum data
 
-## Next Steps
+## Implementation Completed ✅
 
 1. ✅ Create waterfall3dss.c and waterfall3dss.h
-2. ⬜ Modify receiver.h to add `waterfall_mode`
-3. ⬜ Update receiver.c to support both modes
-4. ⬜ Add toggle in display menu
-5. ⬜ Implement save/restore of mode
-6. ⬜ Update Makefile
-7. ⬜ Test and adjust visual parameters
-8. ⬜ Document in project README
+2. ✅ Modify receiver.h to add `waterfall_mode`, `last_waterfall_mode`, `waterfall3dss_palette`
+3. ✅ Update receiver.c to support both modes with dynamic switching
+4. ✅ Add toggle and palette selector in display menu
+5. ✅ Implement save/restore of mode and palette
+6. ✅ Update Makefile
+7. ✅ Test and optimize visual parameters (brightness, contrast, threshold)
+8. ✅ Implement RxPGA auto-threshold adjustment
+9. ✅ Add 7 color palettes
+10. ✅ Test on Linux (primary target platform)
 
 ## Conclusion
 
-The waterfall 3DSS implementation in deskHPSDR maintains full compatibility with existing code, offering users the choice between:
-- Traditional 2D waterfall (lightweight, compatible with any hardware)
-- Modern 3DSS waterfall (enhanced visuals, Yaesu style, interactive controls)
+The waterfall 3DSS implementation in deskHPSDR is **COMPLETE** and maintains full compatibility with existing code. Users can choose between:
 
-Users can switch between modes at any time through the display menu.
+### 2D Waterfall (Default)
+- Lightweight Cairo-based rendering
+- Compatible with any hardware
+- Traditional flat display
+- Lower GPU usage
+
+### 3DSS Waterfall (Yaesu-style)
+- OpenGL 3.3+ rendering (3.2 on macOS)
+- Yaesu FT-dx10 inspired 3D perspective
+- 7 color palettes
+- Interactive controls (drag tilt, scroll zoom)
+- RxPGA auto-threshold adjustment
+- Optimized brightness/contrast
+- Higher visual fidelity
+
+**Note:** This fork focuses exclusively on **LINUX** systems, as macOS does not support GTK3. There are no plans to migrate to GTK4 or implement alternative solutions at this time.
+
+### Latest Improvements (Jan 2026)
+- Enhanced brightness: 50% base threshold with 2.5x boost
+- RxPGA-based auto-threshold: maintains consistent display regardless of gain settings
+- Optimized color mapping: black background for noise, vibrant colors for signals
+- Stabilization system: smooth rendering with minimal artifacts
+
+Users can switch between modes at any time through the display menu. Settings are automatically saved and restored.
