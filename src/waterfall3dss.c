@@ -131,6 +131,11 @@ typedef struct {
   // Stabilization counter
   int update_count;
   int render_count;
+  
+  // Auto-adjust threshold based on RxPGA changes
+  int last_alex_attenuation;
+  int last_preamp;
+  float base_threshold;
 } WaterfallGLState;
 
 // Global state storage (indexed by rx->id)
@@ -328,59 +333,99 @@ static void sample_to_color(RECEIVER *rx, float sample_db, float dist01,
   
   int palette = rx->waterfall3dss_palette; // 0=Rainbow, 1=Ocean, 2=Green, 3=Gray, 4=Hot, 5=Cool, 6=Plasma
   
-  // Aggressive threshold: below 35% is completely black (noise floor)
-  // This creates the Yaesu-style "black where no signal" look
-  const float noise_threshold = 0.35f;
+  // Get WaterfallGLState for auto-threshold adjustment
+  WaterfallGLState *st = wf_get(rx);
+  
+  // Auto-adjust threshold when RxPGA changes (alex_attenuation or preamp)
+  float noise_threshold = 0.50f; // Default base threshold
+  
+  if (st) {
+    // Detect gain changes
+    int current_atten = rx->alex_attenuation;
+    int current_preamp = rx->preamp;
+    
+    if (st->last_alex_attenuation != current_atten || st->last_preamp != current_preamp) {
+      // Calculate gain delta in dB
+      // alex_attenuation: each step = -10dB (0=0dB, 1=-10dB, 2=-20dB, 3=-30dB)
+      // preamp: each step = +18dB (0=0dB, 1=+18dB)
+      int gain_delta = (st->last_alex_attenuation - current_atten) * 10 + 
+                       (current_preamp - st->last_preamp) * 18;
+      
+      // Adjust base threshold: increase threshold when gain increases
+      // This keeps visual sensitivity constant
+      float db_range = db_max - db_min;
+      if (db_range > 0.0f) {
+        st->base_threshold += (float)gain_delta / db_range;
+        st->base_threshold = clampf(st->base_threshold, 0.20f, 0.80f);
+      }
+      
+      // Update tracking
+      st->last_alex_attenuation = current_atten;
+      st->last_preamp = current_preamp;
+    }
+    
+    noise_threshold = st->base_threshold;
+  }
   
   if (p < noise_threshold) {
-    // Noise floor: completely black and flat
+    // Below threshold: completely black (no signal)
     *r = 0.0f;
     *g = 0.0f;
     *b = 0.0f;
-    *h01 = 0.0f;  // Keep flat (no height)
+    *h01 = 0.0f;  // Flat (no height)
   } else {
-    // Valid signal: remap to 0-1 range and apply power curve for emphasis
+    // Strong signal: remap to 0-1 range with high brightness
     float signal = (p - noise_threshold) / (1.0f - noise_threshold);
     
-    // Apply power curve to make peaks more pronounced (square makes it more aggressive)
-    signal = signal * signal; // Quadratic curve emphasizes strong signals
+    // Linear mapping for direct correlation with panadapter
     
-    // Increase height for valid signals (multiply by 1.8 for taller peaks)
+    // Height proportional to signal strength
     *h01 = signal * 1.8f;
     *h01 = clampf(*h01, 0.0f, 1.0f);
     
-    // Plasma (6): White → Blue → Lilac → Red
+    // Plasma (6): Enhanced saturation for vibrant colors
     if (palette == 6) {
       if (dist01 < 0.33f) {
         float t = dist01 / 0.33f;
-        *r = 1.0f - t * 0.8f;
-        *g = 1.0f - t * 0.6f;
+        *r = 1.0f - t * 0.5f;  // Keep more white
+        *g = 1.0f - t * 0.4f;
         *b = 1.0f;
       } else if (dist01 < 0.66f) {
         float t = (dist01 - 0.33f) / 0.33f;
-        *r = 0.2f + t * 0.5f;
-        *g = 0.4f + t * 0.1f;
+        *r = 0.5f + t * 0.5f;
+        *g = 0.6f + t * 0.2f;
         *b = 1.0f;
       } else {
         float t = (dist01 - 0.66f) / 0.34f;
-        *r = 0.7f + t * 0.3f;
-        *g = 0.5f - t * 0.5f;
-        *b = 1.0f - t * 1.0f;
+        *r = 1.0f;
+        *g = 0.8f - t * 0.8f;
+        *b = 1.0f - t * 0.8f;
       }
     } else {
-      // Other palettes: white (near) → target color (far)
+      // Other palettes: maintain high saturation throughout depth
       float target_r, target_g, target_b;
       color_from_palette(palette, 1.0f, &target_r, &target_g, &target_b);
       
-      *r = 1.0f + dist01 * (target_r - 1.0f);
-      *g = 1.0f + dist01 * (target_g - 1.0f);
-      *b = 1.0f + dist01 * (target_b - 1.0f);
+      // Reduce distance fade for more vibrant colors throughout
+      float fade = dist01 * 0.4f;  // Only fade 40% instead of 100%
+      *r = 1.0f + fade * (target_r - 1.0f);
+      *g = 1.0f + fade * (target_g - 1.0f);
+      *b = 1.0f + fade * (target_b - 1.0f);
     }
     
-    // Modulate brightness by signal intensity (using remapped signal value)
-    *r *= signal;
-    *g *= signal;
-    *b *= signal;
+    // Very high brightness boost for strong signals
+    // Higher base (0.6) and strong amplification (2.5x)
+    float brightness_boost = 0.6f + (signal * 2.5f);
+    brightness_boost = clampf(brightness_boost, 0.6f, 3.0f);
+    
+    *r *= brightness_boost;
+    *g *= brightness_boost;
+    *b *= brightness_boost;
+    
+    // Clamp to valid range
+    *r = clampf(*r, 0.0f, 1.0f);
+    *g = clampf(*g, 0.0f, 1.0f);
+    *b = clampf(*b, 0.0f, 1.0f);
   }
   
   *a = 1.0f;
@@ -827,6 +872,12 @@ void waterfall3dss_init(RECEIVER *rx, int width, int height) {
     st->bins = rx->pixels;
     st->history = (float*)g_malloc0(st->depth * st->bins * sizeof(float));
     st->update_count = 0;
+    
+    // Initialize auto-threshold tracking
+    st->last_alex_attenuation = rx->alex_attenuation;
+    st->last_preamp = rx->preamp;
+    st->base_threshold = 0.50f; // Start with 50% threshold
+    
     wf_reset_history(st);
   }
   
